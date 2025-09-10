@@ -1,0 +1,441 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Excel 图片批量下载器
+支持导入 Excel 表格，预览数据，并批量下载图片
+"""
+
+
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import pandas as pd
+import requests
+import os
+from urllib.parse import urlparse
+import re
+from threading import Thread
+import time
+from PIL import Image, ImageTk
+
+class ImageDownloader:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("通用 Excel 图片批量下载器")
+        self.root.geometry("1200x800")
+        self.root.configure(bg="#f0f0f0")
+        
+        # 数据存储
+        self.df = None
+        self.download_folder = ""
+        self.filename_pattern = "{column0}_{column1}.png"
+        self.available_columns = []
+        self.url_column = None
+        
+        self.setup_ui()
+    
+    def setup_ui(self):
+        """设置用户界面"""
+        # 主框架
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # 配置主窗口的网格权重
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(1, weight=1)
+        
+        # 标题
+        title_label = tk.Label(main_frame, text="通用 Excel 图片批量下载器", 
+                              font=("Arial", 16, "bold"), bg="#f0f0f0")
+        title_label.grid(row=0, column=0, columnspan=3, pady=(0, 20))
+        
+        # Excel 文件选择区域
+        excel_frame = ttk.LabelFrame(main_frame, text="选择 Excel 文件", padding="10")
+        excel_frame.grid(row=1, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 10))
+        excel_frame.columnconfigure(1, weight=1)
+        
+        ttk.Label(excel_frame, text="Excel 文件:").grid(row=0, column=0, padx=(0, 10))
+        self.excel_path_var = tk.StringVar()
+        self.excel_entry = ttk.Entry(excel_frame, textvariable=self.excel_path_var, width=50)
+        self.excel_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(0, 10))
+        
+        ttk.Button(excel_frame, text="浏览", 
+                  command=self.browse_excel_file).grid(row=0, column=2)
+        
+        ttk.Button(excel_frame, text="导入数据", 
+                  command=self.import_excel_data).grid(row=0, column=3, padx=(10, 0))
+        
+        # 栏目配置区域
+        self.config_frame = ttk.LabelFrame(main_frame, text="栏目配置", padding="10")
+        self.config_frame.grid(row=2, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 10))
+        self.config_frame.columnconfigure(1, weight=1)
+        
+        # 图片链接栏位选择
+        ttk.Label(self.config_frame, text="图片链接栏位:").grid(row=0, column=0, padx=(0, 10), sticky=tk.W)
+        self.url_column_var = tk.StringVar()
+        self.url_column_combo = ttk.Combobox(self.config_frame, textvariable=self.url_column_var, 
+                                           state="readonly", width=20)
+        self.url_column_combo.grid(row=0, column=1, sticky=tk.W, padx=(0, 20))
+        
+        # 文件命名栏位选择
+        ttk.Label(self.config_frame, text="命名格式:").grid(row=0, column=2, padx=(0, 10), sticky=tk.W)
+        
+        # 命名格式配置框架
+        naming_frame = ttk.Frame(self.config_frame)
+        naming_frame.grid(row=1, column=0, columnspan=4, sticky=(tk.W, tk.E), pady=(10, 0))
+        naming_frame.columnconfigure(0, weight=1)
+        
+        # 可用栏位显示
+        self.available_columns_label = ttk.Label(naming_frame, text="可用栏位: ", foreground="blue")
+        self.available_columns_label.grid(row=0, column=0, sticky=tk.W)
+        
+        # 命名格式输入
+        format_input_frame = ttk.Frame(naming_frame)
+        format_input_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(5, 0))
+        format_input_frame.columnconfigure(0, weight=1)
+        
+        self.pattern_var = tk.StringVar(value=self.filename_pattern)
+        self.pattern_entry = ttk.Entry(format_input_frame, textvariable=self.pattern_var, width=50)
+        self.pattern_entry.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 10))
+        
+        # 添加栏位按钮
+        self.add_column_var = tk.StringVar()
+        self.add_column_combo = ttk.Combobox(format_input_frame, textvariable=self.add_column_var, 
+                                           state="readonly", width=15)
+        self.add_column_combo.grid(row=0, column=1, padx=(0, 5))
+        
+        ttk.Button(format_input_frame, text="添加栏位", 
+                  command=self.add_column_to_pattern).grid(row=0, column=2, padx=(0, 5))
+        
+        ttk.Button(format_input_frame, text="清空格式", 
+                  command=self.clear_pattern).grid(row=0, column=3)
+        
+        # 命名示例
+        self.example_label = ttk.Label(naming_frame, text="示例: ", foreground="green")
+        self.example_label.grid(row=2, column=0, sticky=tk.W, pady=(5, 0))
+        
+        # 初始状态隐藏配置区域
+        self.config_frame.grid_remove()
+        
+        # 绑定格式变化事件
+        self.pattern_var.trace('w', self.update_filename_example)
+        
+        # 数据预览区域
+        preview_frame = ttk.LabelFrame(main_frame, text="数据预览", padding="10")
+        preview_frame.grid(row=3, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        preview_frame.columnconfigure(0, weight=1)
+        preview_frame.rowconfigure(0, weight=1)
+        
+        # 表格
+        self.tree = ttk.Treeview(preview_frame, show="tree headings")
+        self.tree["columns"] = ()  # 初始为空，动态设置
+        
+        # 滚动条
+        v_scrollbar = ttk.Scrollbar(preview_frame, orient="vertical", command=self.tree.yview)
+        h_scrollbar = ttk.Scrollbar(preview_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
+        
+        self.tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        v_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        h_scrollbar.grid(row=1, column=0, sticky=(tk.W, tk.E))
+        
+        # 下载设置区域
+        download_frame = ttk.LabelFrame(main_frame, text="下载设置", padding="10")
+        download_frame.grid(row=4, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 10))
+        download_frame.columnconfigure(1, weight=1)
+        
+        # 下载文件夹选择
+        ttk.Label(download_frame, text="下载文件夹:").grid(row=0, column=0, padx=(0, 10), sticky=tk.W)
+        self.folder_path_var = tk.StringVar()
+        ttk.Entry(download_frame, textvariable=self.folder_path_var, width=50).grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(0, 10))
+        ttk.Button(download_frame, text="选择文件夹", 
+                  command=self.browse_download_folder).grid(row=0, column=2)
+        
+        # 下载控制区域
+        control_frame = ttk.Frame(main_frame)
+        control_frame.grid(row=5, column=0, columnspan=3, pady=(0, 10))
+        
+        self.download_button = ttk.Button(control_frame, text="开始批量下载", 
+                                        command=self.start_download, state="disabled")
+        self.download_button.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # 进度条
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Progressbar(control_frame, variable=self.progress_var, 
+                                          maximum=100, length=300)
+        self.progress_bar.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # 状态标签
+        self.status_var = tk.StringVar(value="就绪")
+        self.status_label = ttk.Label(control_frame, textvariable=self.status_var)
+        self.status_label.pack(side=tk.LEFT)
+        
+        # 配置主框架的网格权重
+        main_frame.rowconfigure(3, weight=1)
+    
+    def browse_excel_file(self):
+        """浏览选择 Excel 文件"""
+        filename = filedialog.askopenfilename(
+            title="选择 Excel 文件",
+            filetypes=[("Excel 文件", "*.xlsx *.xls"), ("所有文件", "*.*")]
+        )
+        if filename:
+            self.excel_path_var.set(filename)
+    
+    def browse_download_folder(self):
+        """浏览选择下载文件夹"""
+        folder = filedialog.askdirectory(title="选择下载文件夹")
+        if folder:
+            self.folder_path_var.set(folder)
+            self.download_folder = folder
+    
+    def import_excel_data(self):
+        """导入 Excel 数据"""
+        excel_path = self.excel_path_var.get()
+        if not excel_path:
+            messagebox.showerror("错误", "请先选择 Excel 文件")
+            return
+        
+        try:
+            # 读取 Excel 文件
+            self.df = pd.read_excel(excel_path)
+            
+            if len(self.df.columns) == 0:
+                messagebox.showerror("错误", "Excel 文件没有数据列")
+                return
+            
+            # 获取所有列名
+            self.available_columns = list(self.df.columns)
+            
+            # 动态设置表格列
+            self.tree["columns"] = self.available_columns
+            self.tree["show"] = "headings"
+            
+            # 设置列标题和宽度
+            for col in self.available_columns:
+                self.tree.heading(col, text=str(col))
+                self.tree.column(col, width=150, minwidth=100)
+            
+            # 清空现有数据
+            for item in self.tree.get_children():
+                self.tree.delete(item)
+            
+            # 填充数据到表格
+            for index, row in self.df.iterrows():
+                values = [str(row[col]) for col in self.available_columns]
+                self.tree.insert("", "end", values=values)
+            
+            # 更新栏目配置界面
+            self.update_column_config()
+            
+            # 显示配置区域
+            self.config_frame.grid()
+            
+            self.status_var.set(f"成功导入 {len(self.df)} 条记录")
+            
+        except Exception as e:
+            messagebox.showerror("错误", f"导入数据失败: {str(e)}")
+    
+    def update_column_config(self):
+        """更新栏目配置界面"""
+        if not self.available_columns:
+            return
+        
+        # 更新图片链接栏位下拉框
+        self.url_column_combo['values'] = self.available_columns
+        # 默认选择包含"链接"、"url"、"http"等关键词的列
+        url_column = None
+        for col in self.available_columns:
+            col_lower = str(col).lower()
+            if any(keyword in col_lower for keyword in ['链接', 'url', 'http', 'link', '地址']):
+                url_column = col
+                break
+        
+        if url_column:
+            self.url_column_var.set(url_column)
+        elif self.available_columns:
+            self.url_column_var.set(self.available_columns[0])
+        
+        # 更新命名格式栏位下拉框
+        self.add_column_combo['values'] = self.available_columns
+        if self.available_columns:
+            self.add_column_var.set(self.available_columns[0])
+        
+        # 更新可用栏位显示
+        columns_text = "可用栏位: " + ", ".join([f"{{{col}}}" for col in self.available_columns])
+        self.available_columns_label.config(text=columns_text)
+        
+        # 重置命名格式
+        if len(self.available_columns) >= 2:
+            self.filename_pattern = f"{{{self.available_columns[0]}}}_{{{self.available_columns[1]}}}.png"
+        else:
+            self.filename_pattern = f"{{{self.available_columns[0]}}}.png"
+        
+        self.pattern_var.set(self.filename_pattern)
+        
+        # 启用下载按钮
+        self.download_button.config(state="normal")
+    
+    def add_column_to_pattern(self):
+        """添加栏位到命名格式"""
+        selected_column = self.add_column_var.get()
+        if not selected_column:
+            return
+        
+        current_pattern = self.pattern_var.get()
+        # 在光标位置插入或在末尾添加
+        cursor_pos = self.pattern_entry.index(tk.INSERT)
+        
+        # 如果没有扩展名，在扩展名前添加
+        if '.' in current_pattern:
+            parts = current_pattern.rsplit('.', 1)
+            new_pattern = f"{parts[0]}_{{{selected_column}}}.{parts[1]}"
+        else:
+            new_pattern = f"{current_pattern}_{{{selected_column}}}"
+        
+        self.pattern_var.set(new_pattern)
+    
+    def clear_pattern(self):
+        """清空命名格式"""
+        self.pattern_var.set(".png")
+    
+    def update_filename_example(self, *args):
+        """更新文件名示例"""
+        pattern = self.pattern_var.get()
+        try:
+            if self.df is not None and len(self.df) > 0:
+                # 使用实际数据的第一行作为示例
+                example_data = {}
+                for col in self.available_columns:
+                    example_data[col] = str(self.df.iloc[0][col])
+                example = pattern.format(**example_data)
+            else:
+                # 使用默认示例数据
+                example_data = {}
+                for col in self.available_columns:
+                    example_data[col] = f"示例{col}"
+                example = pattern.format(**example_data)
+            
+            self.example_label.config(text=f"示例: {example}")
+        except Exception as e:
+            self.example_label.config(text=f"示例: 格式错误 - {str(e)}")
+    
+    def start_download(self):
+        """开始下载"""
+        if self.df is None or len(self.df) == 0:
+            messagebox.showerror("错误", "没有数据可下载")
+            return
+        
+        if not self.download_folder:
+            messagebox.showerror("错误", "请选择下载文件夹")
+            return
+        
+        # 检查是否选择了图片链接栏位
+        self.url_column = self.url_column_var.get()
+        if not self.url_column:
+            messagebox.showerror("错误", "请选择图片链接栏位")
+            return
+        
+        if self.url_column not in self.available_columns:
+            messagebox.showerror("错误", "选择的图片链接栏位无效")
+            return
+        
+        # 在新线程中执行下载
+        self.download_button.config(state="disabled")
+        thread = Thread(target=self.download_images)
+        thread.daemon = True
+        thread.start()
+    
+    def download_images(self):
+        """下载图片（在后台线程中执行）"""
+        total_count = len(self.df)
+        success_count = 0
+        failed_count = 0
+        
+        try:
+            for index, row in self.df.iterrows():
+                # 更新进度
+                progress = (index / total_count) * 100
+                self.progress_var.set(progress)
+                
+                # 获取图片链接
+                photo_url = str(row[self.url_column]).strip()
+                
+                # 创建用于格式化文件名的数据字典
+                format_data = {}
+                for col in self.available_columns:
+                    format_data[col] = str(row[col]).strip()
+                
+                # 显示当前下载的项目（使用第一个栏位作为标识）
+                identifier = format_data.get(self.available_columns[0], "未知")
+                self.status_var.set(f"正在下载: {identifier}")
+                
+                try:
+                    # 生成文件名
+                    filename = self.pattern_var.get().format(**format_data)
+                    # 清理文件名中的非法字符
+                    filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+                    
+                    # 确保有扩展名
+                    if not filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff')):
+                        filename += '.png'
+                    
+                    filepath = os.path.join(self.download_folder, filename)
+                    
+                    # 下载图片
+                    if self.download_single_image(photo_url, filepath):
+                        success_count += 1
+                    else:
+                        failed_count += 1
+                        
+                except Exception as e:
+                    print(f"下载 {identifier} 的图片时出错: {str(e)}")
+                    failed_count += 1
+            
+            # 下载完成
+            self.progress_var.set(100)
+            self.status_var.set(f"下载完成: 成功 {success_count}, 失败 {failed_count}")
+            
+            # 显示完成消息
+            self.root.after(0, lambda: messagebox.showinfo(
+                "下载完成", 
+                f"批量下载完成!\n成功: {success_count} 张\n失败: {failed_count} 张"
+            ))
+            
+        except Exception as e:
+            self.status_var.set(f"下载过程中出错: {str(e)}")
+        
+        finally:
+            # 重新启用下载按钮
+            self.root.after(0, lambda: self.download_button.config(state="normal"))
+    
+    def download_single_image(self, url, filepath):
+        """下载单张图片"""
+        try:
+            # 发送请求
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            response = requests.get(url, headers=headers, timeout=30)
+            response.raise_for_status()
+            
+            # 保存图片
+            with open(filepath, 'wb') as f:
+                f.write(response.content)
+            
+            return True
+            
+        except Exception as e:
+            print(f"下载图片失败 {url}: {str(e)}")
+            return False
+
+
+def main():
+    """主函数"""
+    root = tk.Tk()
+    app = ImageDownloader(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
